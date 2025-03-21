@@ -19,7 +19,6 @@ package azclient
 import (
 	"os"
 
-	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/armauth"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/utils"
 )
 
@@ -49,10 +48,8 @@ type AzureAuthConfig struct {
 }
 
 type AzureAuthAuxiliaryTokenProvider struct {
-	SubscriptionID string `json:"subscriptionID,omitempty"`
-	ResourceGroup  string `json:"resourceGroup,omitempty"`
-	VaultName      string `json:"vaultName,omitempty"`
-	SecretName     string `json:"secretName,omitempty"`
+	KeyVaultURL string `json:"keyVaultURL,omitempty" yaml:"keyVaultURL,omitempty"`
+	SecretName  string `json:"secretName" yaml:"secretName"`
 }
 
 func (config *AzureAuthConfig) GetAADClientID() string {
@@ -77,13 +74,4 @@ func (config *AzureAuthConfig) GetAzureFederatedTokenFile() (string, bool) {
 		return clientCertPath, true
 	}
 	return config.AADFederatedTokenFile, config.UseFederatedWorkloadIdentityExtension
-}
-
-func (config *AzureAuthAuxiliaryTokenProvider) SecretResourceID() armauth.SecretResourceID {
-	return armauth.SecretResourceID{
-		SubscriptionID: config.SubscriptionID,
-		ResourceGroup:  config.ResourceGroup,
-		VaultName:      config.VaultName,
-		SecretName:     config.SecretName,
-	}
 }

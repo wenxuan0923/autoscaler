@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Azure/go-armbalancer"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/propagation"
 	"golang.org/x/net/http2"
@@ -33,7 +34,8 @@ var (
 	defaultRoundTripper http.RoundTripper
 )
 
-// DefaultHTTPClient returns a shared http client
+// DefaultHTTPClient returns a shared http client, and transport leveraging armbalancer for
+// clientside loadbalancing, so we can leverage HTTP/2, and not get throttled by arm at the instance level.
 func DefaultHTTPClient() *http.Client {
 	return defaultHTTPClient
 }
@@ -58,7 +60,14 @@ func init() {
 	// azure sdk related issue is here:
 	// https://github.com/Azure/azure-sdk-for-go/issues/21346#issuecomment-1699665586
 	configureHttp2TransportPing(defaultTransport)
-	defaultRoundTripper = defaultTransport
+	defaultRoundTripper = armbalancer.New(armbalancer.Options{
+		// PoolSize is the number of clientside http/2 persistent connections
+		// we want to have configured in our transport. Note, that without clientside loadbalancing
+		// with arm, HTTP/2 Will force persistent connection to stick to a single arm instance, and will
+		// result in a substantial amount of throttling
+		PoolSize:  100,
+		Transport: defaultTransport,
+	})
 
 	defaultHTTPClient = &http.Client{
 		Transport: otelhttp.NewTransport(
