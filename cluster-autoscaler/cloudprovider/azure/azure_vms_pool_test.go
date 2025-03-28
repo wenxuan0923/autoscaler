@@ -210,14 +210,14 @@ func TestGetCurSizeForVMsPool(t *testing.T) {
 	ap.curSize = -1 // not initialized
 
 	ap.lastSizeRefresh = time.Now()
-	curSize, err := ap.getCurSize()
-	assert.NoError(t, err)
-	assert.Equal(t, int64(-1), curSize)
+	_, err = ap.getCurSize()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), fmt.Sprintf("size is -1 for vmPool %s", vmsAgentPoolName))
 
 	ap.lastSizeRefresh = time.Now().Add(-1 * 30 * time.Second)
-	curSize, err = ap.getCurSize()
+	curSize, err := ap.getCurSize()
 	assert.NoError(t, err)
-	assert.Equal(t, int64(3), curSize)
+	assert.Equal(t, int32(3), curSize)
 }
 
 func TestGetVMsPoolSize(t *testing.T) {
@@ -228,8 +228,8 @@ func TestGetVMsPoolSize(t *testing.T) {
 	ap.curSize = -1 // not initialized
 	ap.lastSizeRefresh = time.Now().Add(-1 * time.Second)
 
-	curSize, err := ap.getVMPoolSize()
-	assert.Equal(t, int64(-1), curSize)
+	curSize, err := ap.getCurSize()
+	assert.Equal(t, int32(-1), curSize)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), fmt.Sprintf("VMs agent pool %s not found in cache", vmsAgentPoolName))
 }

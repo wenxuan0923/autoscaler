@@ -195,6 +195,9 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 		return nil, fmt.Errorf("failed to parse node group spec: %v", err)
 	}
 
+	// Starting from release 1.30, a cluster may have both VMSS and VMs pools.
+	// Therefore, we cannot solely rely on the VMType to determine the node group type.
+	// Instead, we need to check the cache to determine if the agent pool is a VMs pool.
 	isVMPool, agentPoolName, sku := m.parseSKUAndVMsAgentpoolNameFromSpecName(s.Name)
 	if isVMPool {
 		return NewVMPool(s, m, agentPoolName, sku)

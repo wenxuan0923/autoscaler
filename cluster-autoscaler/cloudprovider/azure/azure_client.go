@@ -19,6 +19,7 @@ package azure
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	_ "go.uber.org/mock/mockgen/model" // for go:generate
@@ -96,10 +97,25 @@ func getAgentpoolClientCredentials(cfg *Config) (azcore.TokenCredential, error) 
 			})
 		}
 
-		// Use Service Principal
+		// Use Service Principal with ClientID and ClientSecret
 		if len(cfg.AADClientID) > 0 && len(cfg.AADClientSecret) > 0 {
 			klog.V(2).Infoln("Agentpool client: using client_id+client_secret to retrieve access token")
 			return azidentity.NewClientSecretCredential(cfg.TenantID, cfg.AADClientID, cfg.AADClientSecret, nil)
+		}
+
+		// Use Service Principal with ClientCert and AADClientCertPassword
+		if len(cfg.AADClientID) > 0 && len(cfg.AADClientCertPath) > 0 {
+			klog.V(2).Infoln("Agentpool client: using client_cert+client_private_key to retrieve access token")
+			certData, err := os.ReadFile(cfg.AADClientCertPath)
+			if err != nil {
+				return nil, fmt.Errorf("reading the client certificate from file %s failed with error: %w", cfg.AADClientCertPath, err)
+			}
+
+			certs, privateKey, err := azidentity.ParseCertificates(certData, []byte(cfg.AADClientCertPassword))
+			if err != nil {
+				return nil, fmt.Errorf("parsing service principal certificate data failed with error: %w", err)
+			}
+			return azidentity.NewClientCertificateCredential(cfg.TenantID, cfg.AADClientID, certs, privateKey, nil)
 		}
 	}
 

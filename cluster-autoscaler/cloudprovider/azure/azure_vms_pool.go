@@ -36,8 +36,12 @@ import (
 	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
-// VMPool represents a pool of standalone VMs with a single SKU.
-// It is part of a mixed-SKU agent pool (agent pool with type `VirtualMachines`).
+// VMPool represents a group of standalone virtual machines (VMs) with a single SKU.
+// It is part of a mixed-SKU agent pool (an agent pool with type `VirtualMachines`).
+// Terminology:
+// - Agent pool: A node pool in an AKS cluster.
+// - VMs pool: An agent pool of type `VirtualMachines`, which can contain mixed SKUs.
+// - VMPool: A subset of VMs within a VMs pool that share the same SKU.
 type VMPool struct {
 	azureRef
 	manager              *AzureManager
@@ -50,7 +54,7 @@ type VMPool struct {
 
 	minSize           int
 	maxSize           int
-	curSize           int64
+	curSize           int32
 	sizeMutex         sync.Mutex
 	lastSizeRefresh   time.Time
 	sizeRefreshPeriod time.Duration
@@ -73,8 +77,8 @@ func NewVMPool(spec *dynamic.NodeGroupSpec, am *AzureManager, agentPoolName stri
 		agentPoolName: agentPoolName,
 
 		manager:                   am,
-		resourceGroup:             am.config.ResourceGroup,
-		clusterResourceGroup:      am.config.ClusterResourceGroup,
+		resourceGroup:             am.config.ResourceGroup,        // MC_ resource group for nodes
+		clusterResourceGroup:      am.config.ClusterResourceGroup, // resource group for the cluster itself
 		clusterName:               am.config.ClusterName,
 		location:                  am.config.Location,
 		sizeRefreshPeriod:         am.azureCache.refreshInterval,
@@ -130,37 +134,8 @@ func (vmPool *VMPool) MaxSize() int {
 // TargetSize returns the current TARGET size of the node group. It is possible that the
 // number is different from the number of nodes registered in Kubernetes.
 func (vmPool *VMPool) TargetSize() (int, error) {
-	size, err := vmPool.getVMPoolSize()
-	return int(size), err
-}
-
-func (vmPool *VMPool) getAgentpoolFromAzure() (armcontainerservice.AgentPool, error) {
-	ctx, cancel := getContextWithTimeout(vmsContextTimeout)
-	defer cancel()
-	resp, err := vmPool.manager.azClient.agentPoolClient.Get(
-		ctx,
-		vmPool.clusterResourceGroup,
-		vmPool.clusterName,
-		vmPool.agentPoolName, nil)
-	if err != nil {
-		return resp.AgentPool, fmt.Errorf("failed to get agentpool %s in cluster %s with error: %v",
-			vmPool.agentPoolName, vmPool.clusterName, err)
-	}
-	return resp.AgentPool, nil
-}
-
-// getVMPoolSize returns the current size of the vmPool.
-func (vmPool *VMPool) getVMPoolSize() (int64, error) {
 	size, err := vmPool.getCurSize()
-	if err != nil {
-		klog.Errorf("Failed to get vmPool %s size with error: %s", vmPool.Name, err)
-		return size, err
-	}
-	if size == -1 {
-		klog.Errorf("vmPool %s size is -1, it is still being initialized", vmPool.Name)
-		return size, fmt.Errorf("getVMPoolSize: size is -1 for vmPool %s", vmPool.Name)
-	}
-	return size, nil
+	return int(size), err
 }
 
 // IncreaseSize increase the size through a PUT AP call.
@@ -169,7 +144,7 @@ func (vmPool *VMPool) IncreaseSize(delta int) error {
 		return fmt.Errorf("size increase must be positive, current delta: %d", delta)
 	}
 
-	currentSize, err := vmPool.getVMPoolSize()
+	currentSize, err := vmPool.getCurSize()
 	if err != nil {
 		return err
 	}
@@ -182,43 +157,40 @@ func (vmPool *VMPool) IncreaseSize(delta int) error {
 		return fmt.Errorf("size-increasing request of %d is bigger than max size %d", int(currentSize)+delta, vmPool.MaxSize())
 	}
 
-	return vmPool.scaleUpToCount(currentSize + int64(delta))
+	return vmPool.scaleUpToCount(currentSize + int32(delta))
 }
 
 // buildRequestBodyForScaleUp builds the request body for scale up for self-hosted CAS
-func (vmPool *VMPool) buildRequestBodyForScaleUp(versionedAP armcontainerservice.AgentPool, count int64) (armcontainerservice.AgentPool, error) {
-	if versionedAP.Properties != nil &&
-		versionedAP.Properties.VirtualMachinesProfile != nil &&
-		versionedAP.Properties.VirtualMachinesProfile.Scale != nil {
-		requestBody := armcontainerservice.AgentPool{
-			Properties: &armcontainerservice.ManagedClusterAgentPoolProfileProperties{
-				Type: versionedAP.Properties.Type,
-			},
-		}
+func buildRequestBodyForScaleUp(agentpool armcontainerservice.AgentPool, count int32, vmSku string) armcontainerservice.AgentPool {
+	requestBody := armcontainerservice.AgentPool{
+		Properties: &armcontainerservice.ManagedClusterAgentPoolProfileProperties{
+			Type: agentpool.Properties.Type,
+		},
+	}
 
-		// the request body must have the same mode as the original agentpool
-		// otherwise the PUT request will fail
-		if versionedAP.Properties.Mode != nil &&
-			*versionedAP.Properties.Mode == armcontainerservice.AgentPoolModeSystem {
-			systemMode := armcontainerservice.AgentPoolModeSystem
-			requestBody.Properties.Mode = &systemMode
-		}
+	// the request body must have the same mode as the original agentpool
+	// otherwise the PUT request will fail
+	if agentpool.Properties.Mode != nil &&
+		*agentpool.Properties.Mode == armcontainerservice.AgentPoolModeSystem {
+		systemMode := armcontainerservice.AgentPoolModeSystem
+		requestBody.Properties.Mode = &systemMode
+	}
 
-		// set the count of the matching manual scale profile to the new target value
-		for _, manualProfile := range versionedAP.Properties.VirtualMachinesProfile.Scale.Manual {
-			if manualProfile != nil && len(manualProfile.Sizes) == 1 &&
-				strings.EqualFold(to.String(manualProfile.Sizes[0]), vmPool.sku) {
-				manualProfile.Count = to.Int32Ptr(int32(count))
-				requestBody.Properties.VirtualMachinesProfile = versionedAP.Properties.VirtualMachinesProfile
-				return requestBody, nil
-			}
+	// set the count of the matching manual scale profile to the new target value
+	for _, manualProfile := range agentpool.Properties.VirtualMachinesProfile.Scale.Manual {
+		if manualProfile != nil && len(manualProfile.Sizes) == 1 &&
+			strings.EqualFold(to.String(manualProfile.Sizes[0]), vmSku) {
+			klog.V(5).Infof("Found matching manual profile for VM SKU: %s, updating count to: %d", vmSku, count)
+			manualProfile.Count = to.Int32Ptr(count)
+			requestBody.Properties.VirtualMachinesProfile = agentpool.Properties.VirtualMachinesProfile
+			break
 		}
 	}
-	return armcontainerservice.AgentPool{}, fmt.Errorf("failed to build request body for scale up, agentpool doesn't have valid virtualMachinesProfile")
+	return requestBody
 }
 
 // scaleUpToCount sets node count for vmPool to target value through PUT AP call.
-func (vmPool *VMPool) scaleUpToCount(count int64) error {
+func (vmPool *VMPool) scaleUpToCount(count int32) error {
 	vmPool.sizeMutex.Lock()
 	defer vmPool.sizeMutex.Unlock()
 
@@ -234,11 +206,8 @@ func (vmPool *VMPool) scaleUpToCount(count int64) error {
 	requestBody := armcontainerservice.AgentPool{}
 	// self-hosted CAS will be using Manual scale profile
 	if len(versionedAP.Properties.VirtualMachinesProfile.Scale.Manual) > 0 {
-		requestBody, err = vmPool.buildRequestBodyForScaleUp(versionedAP, count)
-		if err != nil {
-			klog.Errorf("Failed to build request body for scale up VMPool %s, error: %s", vmPool.Name, err)
-			return err
-		}
+		requestBody = buildRequestBodyForScaleUp(versionedAP, count, vmPool.sku)
+
 	} else { // AKS-managed CAS will use custom header for setting the target count
 		header := make(http.Header)
 		header.Set("Target-Count", fmt.Sprintf("%d", count))
@@ -277,7 +246,7 @@ func (vmPool *VMPool) scaleUpToCount(count int64) error {
 // DeleteNodes extracts the providerIDs from the node spec and
 // delete or deallocate the nodes based on the scale down policy of agentpool.
 func (vmPool *VMPool) DeleteNodes(nodes []*apiv1.Node) error {
-	currentSize, err := vmPool.getVMPoolSize()
+	currentSize, err := vmPool.getCurSize()
 	if err != nil {
 		return err
 	}
@@ -347,7 +316,7 @@ func (vmPool *VMPool) scaleDownNodes(providerIDs []string) error {
 		return err
 	}
 
-	vmPool.curSize -= int64(len(providerIDs))
+	vmPool.curSize -= int32(len(providerIDs))
 	vmPool.lastSizeRefresh = time.Now()
 	klog.Infof("Decreased vmPool %s size to %d", vmPool.Name, vmPool.curSize)
 
@@ -385,10 +354,16 @@ func (vmPool *VMPool) Belongs(node *apiv1.Node) (bool, error) {
 	return true, nil
 }
 
-// DecreaseTargetSize decreases the target size of the node group.
+// DecreaseTargetSize decreases the target size of the node group. This function
+// doesn't permit to delete any existing node and can be used only to reduce the
+// request for new nodes that have not been yet fulfilled. Delta should be negative.
+// It is assumed that cloud provider will not delete the existing nodes if the size
+// when there is an option to just decrease the target.
 func (vmPool *VMPool) DecreaseTargetSize(delta int) error {
+	// VMPool size should be changed automatically after the Node deletion, hence this operation is not required.
+	// To prevent some unreproducible bugs, an extra refresh of cache is needed.
 	vmPool.manager.invalidateCache()
-	_, err := vmPool.getVMPoolSize()
+	_, err := vmPool.getCurSize()
 	if err != nil {
 		klog.Warningf("DecreaseTargetSize: failed with error: %v", err)
 	}
@@ -435,7 +410,7 @@ const (
 
 // getCurSize returns the current vm count in the vmPool
 // It uses azure cache as the source of truth for non-spot pools, and resorts to AKS-RP for spot pools
-func (vmPool *VMPool) getCurSize() (int64, error) {
+func (vmPool *VMPool) getCurSize() (int32, error) {
 	vmPool.sizeMutex.Lock()
 	defer vmPool.sizeMutex.Unlock()
 
@@ -452,6 +427,10 @@ func (vmPool *VMPool) getCurSize() (int64, error) {
 	}
 
 	if vmPool.lastSizeRefresh.Add(cacheTTL).After(time.Now()) {
+		if vmPool.curSize == -1 {
+			klog.Errorf("VMPool %s size is -1, it is still being initialized", vmPool.Name)
+			return vmPool.curSize, fmt.Errorf("getCurSize: size is -1 for vmPool %s", vmPool.Name)
+		}
 		klog.V(3).Infof("VMPool: %s, returning in-memory size: %d", vmPool.Name, vmPool.curSize)
 		return vmPool.curSize, nil
 	}
@@ -464,7 +443,7 @@ func (vmPool *VMPool) getCurSize() (int64, error) {
 		}
 	}
 
-	realSize := int64(getNodeCountForSkuFromAgentPool(ap, vmPool.sku))
+	realSize := getNodeCountForSkuFromAgentPool(ap, vmPool.sku)
 
 	if vmPool.curSize != realSize {
 		// invalidate the instance cache if the size has changed.
@@ -477,7 +456,7 @@ func (vmPool *VMPool) getCurSize() (int64, error) {
 	return vmPool.curSize, nil
 }
 
-// getVMsFromCache returns the list of virtual machines in this vmPool
+// getVMsFromCache returns the list of virtual machines in this VMPool
 func (vmPool *VMPool) getVMsFromCache() ([]compute.VirtualMachine, error) {
 	curSize, err := vmPool.getCurSize()
 	if err != nil {
@@ -498,7 +477,7 @@ func (vmPool *VMPool) getVMsFromCache() ([]compute.VirtualMachine, error) {
 		}
 	}
 
-	if int64(len(vmsWithsku)) != curSize {
+	if int32(len(vmsWithsku)) != curSize {
 		klog.V(5).Infof("VMPool %s has vm list size (%d) != curSize (%d), invalidating azure cache",
 			vmPool.Name, len(vmsWithsku), curSize)
 		vmPool.manager.invalidateCache()
@@ -536,7 +515,10 @@ func (vmPool *VMPool) TemplateNodeInfo() (*schedulerframework.NodeInfo, error) {
 		return nil, err
 	}
 
-	template := buildNodeTemplateFromVMPool(ap, vmPool.location, vmPool.sku)
+	template, err := buildNodeTemplateFromVMPool(ap, vmPool.location, vmPool.sku)
+	if err != nil {
+		return nil, err
+	}
 	node, err := buildNodeFromTemplate(vmPool.agentPoolName, template, vmPool.manager, vmPool.enableDynamicInstanceList)
 	if err != nil {
 		return nil, err
@@ -553,6 +535,22 @@ func (vmPool *VMPool) getAgentpoolFromCache() (armcontainerservice.AgentPool, er
 		return armcontainerservice.AgentPool{}, fmt.Errorf("VMs agent pool %s not found in cache", vmPool.agentPoolName)
 	}
 	return vmsPoolMap[vmPool.agentPoolName], nil
+}
+
+// getAgentpoolFromAzure returns the AKS agentpool from Azure
+func (vmPool *VMPool) getAgentpoolFromAzure() (armcontainerservice.AgentPool, error) {
+	ctx, cancel := getContextWithTimeout(vmsContextTimeout)
+	defer cancel()
+	resp, err := vmPool.manager.azClient.agentPoolClient.Get(
+		ctx,
+		vmPool.clusterResourceGroup,
+		vmPool.clusterName,
+		vmPool.agentPoolName, nil)
+	if err != nil {
+		return resp.AgentPool, fmt.Errorf("failed to get agentpool %s in cluster %s with error: %v",
+			vmPool.agentPoolName, vmPool.clusterName, err)
+	}
+	return resp.AgentPool, nil
 }
 
 // AtomicIncreaseSize is not implemented.

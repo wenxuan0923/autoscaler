@@ -176,7 +176,8 @@ func TestTopologyFromScaleSet(t *testing.T) {
 		Location: to.StringPtr("westus"),
 	}
 	expectedZoneValues := []string{"westus-1", "westus-2", "westus-3"}
-	template := buildNodeTemplateFromVMSS(testVmss, map[string]string{}, "")
+	template, err := buildNodeTemplateFromVMSS(testVmss, map[string]string{}, "")
+	assert.Nil(t, err)
 	labels := buildGenericLabels(template, testNodeName)
 	failureDomain, ok := labels[apiv1.LabelZoneFailureDomain]
 	assert.True(t, ok)
@@ -205,7 +206,8 @@ func TestEmptyTopologyFromScaleSet(t *testing.T) {
 	expectedFailureDomain := "0"
 	expectedTopologyZone := "0"
 	expectedAzureDiskTopology := ""
-	template := buildNodeTemplateFromVMSS(testVmss, map[string]string{}, "")
+	template, err := buildNodeTemplateFromVMSS(testVmss, map[string]string{}, "")
+	assert.Nil(t, err)
 	labels := buildGenericLabels(template, testNodeName)
 
 	failureDomain, ok := labels[apiv1.LabelZoneFailureDomain]

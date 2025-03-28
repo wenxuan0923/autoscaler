@@ -653,9 +653,11 @@ func (scaleSet *ScaleSet) TemplateNodeInfo() (*schedulerframework.NodeInfo, erro
 
 	inputLabels := map[string]string{}
 	inputTaints := ""
-	template := buildNodeTemplateFromVMSS(vmss, inputLabels, inputTaints)
+	template, err := buildNodeTemplateFromVMSS(vmss, inputLabels, inputTaints)
+	if err != nil {
+		return nil, err
+	}
 	node, err := buildNodeFromTemplate(scaleSet.Name, template, scaleSet.manager, scaleSet.enableDynamicInstanceList)
-
 	if err != nil {
 		return nil, err
 	}
